@@ -104,6 +104,9 @@ pub mod usb;
 #[cfg(not(feature = "_nrf5340"))]
 pub mod wdt;
 
+#[cfg(any(feature = "nrf52840"))]
+pub mod radio;
+
 // This mod MUST go last, so that it sees all the `impl_foo!` macros
 #[cfg_attr(feature = "nrf52805", path = "chips/nrf52805.rs")]
 #[cfg_attr(feature = "nrf52810", path = "chips/nrf52810.rs")]

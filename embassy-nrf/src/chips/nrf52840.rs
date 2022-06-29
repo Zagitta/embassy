@@ -24,6 +24,9 @@ embassy_hal_common::peripherals! {
     // RNG
     RNG,
 
+    // RADIO
+    RADIO,
+
     // QSPI
     QSPI,
 
@@ -281,6 +284,8 @@ impl_saadc_input!(P0_28, ANALOGINPUT4);
 impl_saadc_input!(P0_29, ANALOGINPUT5);
 impl_saadc_input!(P0_30, ANALOGINPUT6);
 impl_saadc_input!(P0_31, ANALOGINPUT7);
+
+impl_radio!(RADIO, RADIO, RADIO);
 
 pub mod irqs {
     use embassy_macros::cortex_m_interrupt_declare as declare;
