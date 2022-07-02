@@ -21,6 +21,7 @@ use embassy_hal_common::{unborrow, Unborrow};
 use futures::future::poll_fn;
 use pac::radio::crccnf::SKIPADDR_A;
 use pac::radio::pcnf0::PLEN_A;
+use pac::radio::txpower::TXPOWER_A;
 
 use crate::interrupt::{Interrupt, InterruptExt};
 use crate::pac;
@@ -187,6 +188,7 @@ pub enum Mode {
     Ieee250Kbit,
 }
 
+#[derive(Clone, Copy)]
 pub enum TxPower {
     Pos4dBm,
     Pos3dBm,
@@ -198,6 +200,23 @@ pub enum TxPower {
     Neg20dBm,
     Neg30dBm,
     Neg40dBm,
+}
+
+impl From<TxPower> for TXPOWER_A {
+    fn from(tp: TxPower) -> Self {
+        match tp {
+            TxPower::Pos4dBm => Self::POS4DBM,
+            TxPower::Pos3dBm => Self::POS3DBM,
+            TxPower::ZerodBm => Self::_0DBM,
+            TxPower::Neg4dBm => Self::NEG4DBM,
+            TxPower::Neg8dBm => Self::NEG8DBM,
+            TxPower::Neg12dBm => Self::NEG12DBM,
+            TxPower::Neg16dBm => Self::NEG16DBM,
+            TxPower::Neg20dBm => Self::NEG20DBM,
+            TxPower::Neg30dBm => Self::NEG30DBM,
+            TxPower::Neg40dBm => Self::NEG40DBM,
+        }
+    }
 }
 
 pub enum PreambleLength {
@@ -586,7 +605,7 @@ impl<'d, T: Instance> Radio<'d, T> {
             let r = T::regs();
 
             // Set tx shorts
-            r.shorts.write(|w| w.ready_start().bit(true).end_disable().bit(true));
+            r.shorts.write(|w| w.ready_start().set_bit().end_disable().set_bit());
 
             // TXADDRESS
             // TXADDRESS: 0 (default)
@@ -594,27 +613,16 @@ impl<'d, T: Instance> Radio<'d, T> {
                 .write(|w| unsafe { w.txaddress().bits(tx_config.tx_address.into()) });
 
             // TXPOWER
-            match tx_config.tx_power {
-                TxPower::Pos4dBm => r.txpower.write(|w| w.txpower().pos4d_bm()),
-                TxPower::Pos3dBm => r.txpower.write(|w| w.txpower().pos3d_bm()),
-                TxPower::ZerodBm => r.txpower.write(|w| w.txpower()._0d_bm()),
-                TxPower::Neg4dBm => r.txpower.write(|w| w.txpower().neg4d_bm()),
-                TxPower::Neg8dBm => r.txpower.write(|w| w.txpower().neg8d_bm()),
-                TxPower::Neg12dBm => r.txpower.write(|w| w.txpower().neg12d_bm()),
-                TxPower::Neg16dBm => r.txpower.write(|w| w.txpower().neg16d_bm()),
-                TxPower::Neg20dBm => r.txpower.write(|w| w.txpower().neg20d_bm()),
-                TxPower::Neg30dBm => r.txpower.write(|w| w.txpower().neg30d_bm()),
-                TxPower::Neg40dBm => r.txpower.write(|w| w.txpower().neg40d_bm()),
-            }
+            r.txpower.write(|w| w.txpower().variant(tx_config.tx_power.into()));
 
             // enable "disabled" interrupt
-            r.intenset.write(|w| w.disabled().bit(true));
+            r.intenset.write(|w| w.disabled().set());
 
             // set packet pointer
             r.packetptr
                 .write(|w| unsafe { w.packetptr().bits(packet.as_ptr() as u32) });
             // start transmission task
-            r.tasks_txen.write(|w| w.tasks_txen().bit(true));
+            r.tasks_txen.write(|w| w.tasks_txen().set_bit());
 
             // Conservative compiler fence to prevent optimizations that do not
             // take in to account actions by DMA. The fence has been placed here,
@@ -647,13 +655,13 @@ impl<'d, T: Instance> Radio<'d, T> {
             // Set rx shorts
             r.shorts.write(|w| {
                 w.ready_start()
-                    .bit(true)
+                    .set_bit()
                     .end_disable()
-                    .bit(true)
+                    .set_bit()
                     .address_rssistart()
-                    .bit(true)
+                    .set_bit()
                     .disabled_rssistop()
-                    .bit(true)
+                    .set_bit()
             });
 
             // RXADDRESSES
@@ -677,13 +685,13 @@ impl<'d, T: Instance> Radio<'d, T> {
             });
 
             // enable "disabled" interrupt
-            r.intenset.write(|w| w.disabled().bit(true));
+            r.intenset.write(|w| w.disabled().set_bit());
 
             // set packet pointer
             r.packetptr
                 .write(|w| unsafe { w.packetptr().bits(packet.as_ptr() as u32) });
             // start transmission task
-            r.tasks_rxen.write(|w| w.tasks_rxen().bit(true));
+            r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
 
             // Conservative compiler fence to prevent optimizations that do not
             // take in to account actions by DMA. The fence has been placed here,
