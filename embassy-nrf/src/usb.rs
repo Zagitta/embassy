@@ -2,22 +2,22 @@
 
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU32, Ordering};
 use core::task::Poll;
 
 use cortex_m::peripheral::NVIC;
-use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::unborrow;
+use embassy_hal_common::{into_ref, PeripheralRef};
 pub use embassy_usb;
 use embassy_usb::driver::{self, EndpointError, Event, Unsupported};
 use embassy_usb::types::{EndpointAddress, EndpointInfo, EndpointType, UsbDirection};
+use embassy_util::waitqueue::AtomicWaker;
 use futures::future::poll_fn;
 use futures::Future;
 use pac::usbd::RegisterBlock;
 
 use crate::interrupt::{Interrupt, InterruptExt};
 use crate::util::slice_in_ram;
-use crate::{pac, Unborrow};
+use crate::{pac, Peripheral};
 
 const NEW_AW: AtomicWaker = AtomicWaker::new();
 static BUS_WAKER: AtomicWaker = NEW_AW;
@@ -26,23 +26,157 @@ static EP_IN_WAKERS: [AtomicWaker; 8] = [NEW_AW; 8];
 static EP_OUT_WAKERS: [AtomicWaker; 8] = [NEW_AW; 8];
 static READY_ENDPOINTS: AtomicU32 = AtomicU32::new(0);
 
-pub struct Driver<'d, T: Instance> {
-    phantom: PhantomData<&'d mut T>,
-    alloc_in: Allocator,
-    alloc_out: Allocator,
+/// There are multiple ways to detect USB power. The behavior
+/// here provides a hook into determining whether it is.
+pub trait UsbSupply {
+    fn is_usb_detected(&self) -> bool;
+
+    type UsbPowerReadyFuture<'a>: Future<Output = Result<(), ()>> + 'a
+    where
+        Self: 'a;
+    fn wait_power_ready(&mut self) -> Self::UsbPowerReadyFuture<'_>;
 }
 
-impl<'d, T: Instance> Driver<'d, T> {
-    pub fn new(_usb: impl Unborrow<Target = T> + 'd, irq: impl Unborrow<Target = T::Interrupt> + 'd) -> Self {
-        unborrow!(irq);
+pub struct Driver<'d, T: Instance, P: UsbSupply> {
+    _p: PeripheralRef<'d, T>,
+    alloc_in: Allocator,
+    alloc_out: Allocator,
+    usb_supply: P,
+}
+
+/// Uses the POWER peripheral to detect when power is available
+/// for USB. Unsuitable for usage with the nRF softdevice.
+#[cfg(not(feature = "_nrf5340-app"))]
+pub struct PowerUsb {
+    _private: (),
+}
+
+/// Can be used to signal that power is available. Particularly suited for
+/// use with the nRF softdevice.
+pub struct SignalledSupply {
+    usb_detected: AtomicBool,
+    power_ready: AtomicBool,
+}
+
+static POWER_WAKER: AtomicWaker = NEW_AW;
+
+#[cfg(not(feature = "_nrf5340-app"))]
+impl PowerUsb {
+    pub fn new(power_irq: impl Interrupt) -> Self {
+        let regs = unsafe { &*pac::POWER::ptr() };
+
+        power_irq.set_handler(Self::on_interrupt);
+        power_irq.unpend();
+        power_irq.enable();
+
+        regs.intenset
+            .write(|w| w.usbdetected().set().usbremoved().set().usbpwrrdy().set());
+
+        Self { _private: () }
+    }
+
+    #[cfg(not(feature = "_nrf5340-app"))]
+    fn on_interrupt(_: *mut ()) {
+        let regs = unsafe { &*pac::POWER::ptr() };
+
+        if regs.events_usbdetected.read().bits() != 0 {
+            regs.events_usbdetected.reset();
+            BUS_WAKER.wake();
+        }
+
+        if regs.events_usbremoved.read().bits() != 0 {
+            regs.events_usbremoved.reset();
+            BUS_WAKER.wake();
+            POWER_WAKER.wake();
+        }
+
+        if regs.events_usbpwrrdy.read().bits() != 0 {
+            regs.events_usbpwrrdy.reset();
+            POWER_WAKER.wake();
+        }
+    }
+}
+
+#[cfg(not(feature = "_nrf5340-app"))]
+impl UsbSupply for PowerUsb {
+    fn is_usb_detected(&self) -> bool {
+        let regs = unsafe { &*pac::POWER::ptr() };
+        regs.usbregstatus.read().vbusdetect().is_vbus_present()
+    }
+
+    type UsbPowerReadyFuture<'a> = impl Future<Output = Result<(), ()>> + 'a where Self: 'a;
+    fn wait_power_ready(&mut self) -> Self::UsbPowerReadyFuture<'_> {
+        poll_fn(move |cx| {
+            POWER_WAKER.register(cx.waker());
+            let regs = unsafe { &*pac::POWER::ptr() };
+
+            if regs.usbregstatus.read().outputrdy().is_ready() {
+                Poll::Ready(Ok(()))
+            } else if !self.is_usb_detected() {
+                Poll::Ready(Err(()))
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+}
+
+impl SignalledSupply {
+    pub fn new(usb_detected: bool, power_ready: bool) -> Self {
+        BUS_WAKER.wake();
+
+        Self {
+            usb_detected: AtomicBool::new(usb_detected),
+            power_ready: AtomicBool::new(power_ready),
+        }
+    }
+
+    pub fn detected(&self, detected: bool) {
+        self.usb_detected.store(detected, Ordering::Relaxed);
+        self.power_ready.store(false, Ordering::Relaxed);
+        BUS_WAKER.wake();
+        POWER_WAKER.wake();
+    }
+
+    pub fn ready(&self) {
+        self.power_ready.store(true, Ordering::Relaxed);
+        POWER_WAKER.wake();
+    }
+}
+
+impl UsbSupply for SignalledSupply {
+    fn is_usb_detected(&self) -> bool {
+        self.usb_detected.load(Ordering::Relaxed)
+    }
+
+    type UsbPowerReadyFuture<'a> = impl Future<Output = Result<(), ()>> + 'a where Self: 'a;
+    fn wait_power_ready(&mut self) -> Self::UsbPowerReadyFuture<'_> {
+        poll_fn(move |cx| {
+            POWER_WAKER.register(cx.waker());
+
+            if self.power_ready.load(Ordering::Relaxed) {
+                Poll::Ready(Ok(()))
+            } else if !self.usb_detected.load(Ordering::Relaxed) {
+                Poll::Ready(Err(()))
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+}
+
+impl<'d, T: Instance, P: UsbSupply> Driver<'d, T, P> {
+    pub fn new(usb: impl Peripheral<P = T> + 'd, irq: impl Peripheral<P = T::Interrupt> + 'd, usb_supply: P) -> Self {
+        into_ref!(usb, irq);
         irq.set_handler(Self::on_interrupt);
         irq.unpend();
         irq.enable();
 
         Self {
-            phantom: PhantomData,
+            _p: usb,
             alloc_in: Allocator::new(),
             alloc_out: Allocator::new(),
+            usb_supply,
         }
     }
 
@@ -76,7 +210,6 @@ impl<'d, T: Instance> Driver<'d, T> {
         // doesn't cause an infinite irq loop.
         if regs.events_usbevent.read().bits() != 0 {
             regs.events_usbevent.reset();
-            //regs.intenclr.write(|w| w.usbevent().clear());
             BUS_WAKER.wake();
         }
 
@@ -98,11 +231,11 @@ impl<'d, T: Instance> Driver<'d, T> {
     }
 }
 
-impl<'d, T: Instance> driver::Driver<'d> for Driver<'d, T> {
+impl<'d, T: Instance, P: UsbSupply + 'd> driver::Driver<'d> for Driver<'d, T, P> {
     type EndpointOut = Endpoint<'d, T, Out>;
     type EndpointIn = Endpoint<'d, T, In>;
     type ControlPipe = ControlPipe<'d, T>;
-    type Bus = Bus<'d, T>;
+    type Bus = Bus<'d, T, P>;
 
     fn alloc_endpoint_in(
         &mut self,
@@ -136,22 +269,28 @@ impl<'d, T: Instance> driver::Driver<'d> for Driver<'d, T> {
         }))
     }
 
-    fn start(self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
+    fn start(mut self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
         (
-            Bus { phantom: PhantomData },
+            Bus {
+                _p: unsafe { self._p.clone_unchecked() },
+                power_available: false,
+                usb_supply: self.usb_supply,
+            },
             ControlPipe {
-                _phantom: PhantomData,
+                _p: self._p,
                 max_packet_size: control_max_packet_size,
             },
         )
     }
 }
 
-pub struct Bus<'d, T: Instance> {
-    phantom: PhantomData<&'d mut T>,
+pub struct Bus<'d, T: Instance, P: UsbSupply> {
+    _p: PeripheralRef<'d, T>,
+    power_available: bool,
+    usb_supply: P,
 }
 
-impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
+impl<'d, T: Instance, P: UsbSupply> driver::Bus for Bus<'d, T, P> {
     type EnableFuture<'a> = impl Future<Output = ()> + 'a where Self: 'a;
     type DisableFuture<'a> = impl Future<Output = ()> + 'a where Self: 'a;
     type PollFuture<'a> = impl Future<Output = Event> + 'a where Self: 'a;
@@ -188,9 +327,14 @@ impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
                 w.epdata().set_bit();
                 w
             });
-            // Enable the USB pullup, allowing enumeration.
-            regs.usbpullup.write(|w| w.connect().enabled());
-            trace!("enabled");
+
+            if self.usb_supply.wait_power_ready().await.is_ok() {
+                // Enable the USB pullup, allowing enumeration.
+                regs.usbpullup.write(|w| w.connect().enabled());
+                trace!("enabled");
+            } else {
+                trace!("usb power not ready due to usb removal");
+            }
         }
     }
 
@@ -244,6 +388,17 @@ impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
             if r.ready().bit() {
                 regs.eventcause.write(|w| w.ready().set_bit());
                 trace!("USB event: ready");
+            }
+
+            if self.usb_supply.is_usb_detected() != self.power_available {
+                self.power_available = !self.power_available;
+                if self.power_available {
+                    trace!("Power event: available");
+                    return Poll::Ready(Event::PowerDetected);
+                } else {
+                    trace!("Power event: removed");
+                    return Poll::Ready(Event::PowerRemoved);
+                }
             }
 
             Poll::Pending
@@ -591,7 +746,7 @@ impl<'d, T: Instance> driver::EndpointIn for Endpoint<'d, T, In> {
 }
 
 pub struct ControlPipe<'d, T: Instance> {
-    _phantom: PhantomData<&'d mut T>,
+    _p: PeripheralRef<'d, T>,
     max_packet_size: u16,
 }
 
@@ -791,7 +946,7 @@ pub(crate) mod sealed {
     }
 }
 
-pub trait Instance: Unborrow<Target = Self> + sealed::Instance + 'static + Send {
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + 'static + Send {
     type Interrupt: Interrupt;
 }
 

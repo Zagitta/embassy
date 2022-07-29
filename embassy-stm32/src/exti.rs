@@ -3,13 +3,13 @@ use core::marker::PhantomData;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::unsafe_impl_unborrow;
+use embassy_hal_common::impl_peripheral;
+use embassy_util::waitqueue::AtomicWaker;
 
 use crate::gpio::{AnyPin, Input, Pin as GpioPin};
 use crate::pac::exti::regs::Lines;
 use crate::pac::EXTI;
-use crate::{interrupt, pac, peripherals, Unborrow};
+use crate::{interrupt, pac, peripherals, Peripheral};
 
 const EXTI_COUNT: usize = 16;
 const NEW_AW: AtomicWaker = AtomicWaker::new();
@@ -86,7 +86,7 @@ pub struct ExtiInput<'d, T: GpioPin> {
 impl<'d, T: GpioPin> Unpin for ExtiInput<'d, T> {}
 
 impl<'d, T: GpioPin> ExtiInput<'d, T> {
-    pub fn new(pin: Input<'d, T>, _ch: impl Unborrow<Target = T::ExtiChannel> + 'd) -> Self {
+    pub fn new(pin: Input<'d, T>, _ch: impl Peripheral<P = T::ExtiChannel> + 'd) -> Self {
         Self { pin }
     }
 
@@ -99,7 +99,7 @@ impl<'d, T: GpioPin> ExtiInput<'d, T> {
     }
 
     pub async fn wait_for_high<'a>(&'a mut self) {
-        let fut = ExtiInputFuture::new(self.pin.pin.pin(), self.pin.pin.port(), true, false);
+        let fut = ExtiInputFuture::new(self.pin.pin.pin.pin(), self.pin.pin.pin.port(), true, false);
         if self.is_high() {
             return;
         }
@@ -107,7 +107,7 @@ impl<'d, T: GpioPin> ExtiInput<'d, T> {
     }
 
     pub async fn wait_for_low<'a>(&'a mut self) {
-        let fut = ExtiInputFuture::new(self.pin.pin.pin(), self.pin.pin.port(), false, true);
+        let fut = ExtiInputFuture::new(self.pin.pin.pin.pin(), self.pin.pin.pin.port(), false, true);
         if self.is_low() {
             return;
         }
@@ -115,15 +115,15 @@ impl<'d, T: GpioPin> ExtiInput<'d, T> {
     }
 
     pub async fn wait_for_rising_edge<'a>(&'a mut self) {
-        ExtiInputFuture::new(self.pin.pin.pin(), self.pin.pin.port(), true, false).await
+        ExtiInputFuture::new(self.pin.pin.pin.pin(), self.pin.pin.pin.port(), true, false).await
     }
 
     pub async fn wait_for_falling_edge<'a>(&'a mut self) {
-        ExtiInputFuture::new(self.pin.pin.pin(), self.pin.pin.port(), false, true).await
+        ExtiInputFuture::new(self.pin.pin.pin.pin(), self.pin.pin.pin.port(), false, true).await
     }
 
     pub async fn wait_for_any_edge<'a>(&'a mut self) {
-        ExtiInputFuture::new(self.pin.pin.pin(), self.pin.pin.port(), true, true).await
+        ExtiInputFuture::new(self.pin.pin.pin.pin(), self.pin.pin.pin.port(), true, true).await
     }
 }
 
@@ -320,7 +320,7 @@ pub trait Channel: sealed::Channel + Sized {
 pub struct AnyChannel {
     number: u8,
 }
-unsafe_impl_unborrow!(AnyChannel);
+impl_peripheral!(AnyChannel);
 impl sealed::Channel for AnyChannel {}
 impl Channel for AnyChannel {
     fn number(&self) -> usize {

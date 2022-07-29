@@ -7,23 +7,23 @@ use core::str::from_utf8;
 
 use cortex_m_rt::entry;
 use defmt::*;
-use embassy::executor::Executor;
-use embassy::util::Forever;
+use embassy_executor::executor::Executor;
 use embassy_stm32::peripherals::{DMA1_CH3, DMA1_CH4, SPI3};
-use embassy_stm32::time::U32Ext;
+use embassy_stm32::time::mhz;
 use embassy_stm32::{spi, Config};
+use embassy_util::Forever;
 use heapless::String;
 use {defmt_rtt as _, panic_probe as _};
 
 pub fn config() -> Config {
     let mut config = Config::default();
-    config.rcc.sys_ck = Some(400.mhz().into());
-    config.rcc.hclk = Some(200.mhz().into());
-    config.rcc.pll1.q_ck = Some(100.mhz().into());
+    config.rcc.sys_ck = Some(mhz(400));
+    config.rcc.hclk = Some(mhz(200));
+    config.rcc.pll1.q_ck = Some(mhz(100));
     config
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn main_task(mut spi: spi::Spi<'static, SPI3, DMA1_CH3, DMA1_CH4>) {
     for n in 0u32.. {
         let mut write: String<128> = String::new();
@@ -50,7 +50,7 @@ fn main() -> ! {
         p.PB4,
         p.DMA1_CH3,
         p.DMA1_CH4,
-        1.mhz(),
+        mhz(1),
         spi::Config::default(),
     );
 

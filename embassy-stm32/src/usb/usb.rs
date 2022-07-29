@@ -5,11 +5,11 @@ use core::sync::atomic::Ordering;
 use core::task::Poll;
 
 use atomic_polyfill::{AtomicBool, AtomicU8};
-use embassy::time::{block_for, Duration};
-use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::unborrow;
+use embassy_executor::time::{block_for, Duration};
+use embassy_hal_common::into_ref;
 use embassy_usb::driver::{self, EndpointAllocError, EndpointError, Event, Unsupported};
 use embassy_usb::types::{EndpointAddress, EndpointInfo, EndpointType, UsbDirection};
+use embassy_util::waitqueue::AtomicWaker;
 use futures::future::poll_fn;
 use futures::Future;
 use pac::common::{Reg, RW};
@@ -20,7 +20,7 @@ use crate::gpio::sealed::AFType;
 use crate::interrupt::InterruptExt;
 use crate::pac::usb::regs;
 use crate::rcc::sealed::RccPeripheral;
-use crate::{pac, Unborrow};
+use crate::{pac, Peripheral};
 
 const EP_COUNT: usize = 8;
 
@@ -125,12 +125,12 @@ pub struct Driver<'d, T: Instance> {
 
 impl<'d, T: Instance> Driver<'d, T> {
     pub fn new(
-        _usb: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        dp: impl Unborrow<Target = impl DpPin<T>> + 'd,
-        dm: impl Unborrow<Target = impl DmPin<T>> + 'd,
+        _usb: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        dp: impl Peripheral<P = impl DpPin<T>> + 'd,
+        dm: impl Peripheral<P = impl DmPin<T>> + 'd,
     ) -> Self {
-        unborrow!(irq, dp, dm);
+        into_ref!(irq, dp, dm);
         irq.set_handler(Self::on_interrupt);
         irq.unpend();
         irq.enable();
@@ -160,6 +160,9 @@ impl<'d, T: Instance> Driver<'d, T> {
             dp.set_as_af(dp.af_num(), AFType::OutputPushPull);
             dm.set_as_af(dm.af_num(), AFType::OutputPushPull);
         }
+
+        // Initialize the bus so that it signals that power is available
+        BUS_WAKER.wake();
 
         Self {
             phantom: PhantomData,
@@ -406,6 +409,7 @@ impl<'d, T: Instance> driver::Driver<'d> for Driver<'d, T> {
             Bus {
                 phantom: PhantomData,
                 ep_types,
+                inited: false,
             },
             ControlPipe {
                 _phantom: PhantomData,
@@ -420,6 +424,7 @@ impl<'d, T: Instance> driver::Driver<'d> for Driver<'d, T> {
 pub struct Bus<'d, T: Instance> {
     phantom: PhantomData<&'d mut T>,
     ep_types: [EpType; EP_COUNT - 1],
+    inited: bool,
 }
 
 impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
@@ -428,53 +433,59 @@ impl<'d, T: Instance> driver::Bus for Bus<'d, T> {
     fn poll<'a>(&'a mut self) -> Self::PollFuture<'a> {
         poll_fn(move |cx| unsafe {
             BUS_WAKER.register(cx.waker());
-            let regs = T::regs();
 
-            let flags = IRQ_FLAGS.load(Ordering::Acquire);
+            if self.inited {
+                let regs = T::regs();
 
-            if flags & IRQ_FLAG_RESUME != 0 {
-                IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESUME, Ordering::AcqRel);
-                return Poll::Ready(Event::Resume);
-            }
+                let flags = IRQ_FLAGS.load(Ordering::Acquire);
 
-            if flags & IRQ_FLAG_RESET != 0 {
-                IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESET, Ordering::AcqRel);
-
-                trace!("RESET REGS WRITINGINGING");
-                regs.daddr().write(|w| {
-                    w.set_ef(true);
-                    w.set_add(0);
-                });
-
-                regs.epr(0).write(|w| {
-                    w.set_ep_type(EpType::CONTROL);
-                    w.set_stat_rx(Stat::NAK);
-                    w.set_stat_tx(Stat::NAK);
-                });
-
-                for i in 1..EP_COUNT {
-                    regs.epr(i).write(|w| {
-                        w.set_ea(i as _);
-                        w.set_ep_type(self.ep_types[i - 1]);
-                    })
+                if flags & IRQ_FLAG_RESUME != 0 {
+                    IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESUME, Ordering::AcqRel);
+                    return Poll::Ready(Event::Resume);
                 }
 
-                for w in &EP_IN_WAKERS {
-                    w.wake()
+                if flags & IRQ_FLAG_RESET != 0 {
+                    IRQ_FLAGS.fetch_and(!IRQ_FLAG_RESET, Ordering::AcqRel);
+
+                    trace!("RESET REGS WRITINGINGING");
+                    regs.daddr().write(|w| {
+                        w.set_ef(true);
+                        w.set_add(0);
+                    });
+
+                    regs.epr(0).write(|w| {
+                        w.set_ep_type(EpType::CONTROL);
+                        w.set_stat_rx(Stat::NAK);
+                        w.set_stat_tx(Stat::NAK);
+                    });
+
+                    for i in 1..EP_COUNT {
+                        regs.epr(i).write(|w| {
+                            w.set_ea(i as _);
+                            w.set_ep_type(self.ep_types[i - 1]);
+                        })
+                    }
+
+                    for w in &EP_IN_WAKERS {
+                        w.wake()
+                    }
+                    for w in &EP_OUT_WAKERS {
+                        w.wake()
+                    }
+
+                    return Poll::Ready(Event::Reset);
                 }
-                for w in &EP_OUT_WAKERS {
-                    w.wake()
+
+                if flags & IRQ_FLAG_SUSPEND != 0 {
+                    IRQ_FLAGS.fetch_and(!IRQ_FLAG_SUSPEND, Ordering::AcqRel);
+                    return Poll::Ready(Event::Suspend);
                 }
 
-                return Poll::Ready(Event::Reset);
+                Poll::Pending
+            } else {
+                self.inited = true;
+                return Poll::Ready(Event::PowerDetected);
             }
-
-            if flags & IRQ_FLAG_SUSPEND != 0 {
-                IRQ_FLAGS.fetch_and(!IRQ_FLAG_SUSPEND, Ordering::AcqRel);
-                return Poll::Ready(Event::Suspend);
-            }
-
-            Poll::Pending
         })
     }
 

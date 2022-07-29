@@ -1,13 +1,16 @@
 use core::marker::PhantomData;
 
-use embassy_hal_common::unborrow;
+use embassy_hal_common::into_ref;
 use embedded_hal_02::blocking::delay::DelayUs;
 
 use crate::adc::{AdcPin, Instance};
 use crate::time::Hertz;
-use crate::Unborrow;
+use crate::Peripheral;
 
-pub const VDDA_CALIB_MV: u32 = 3000;
+/// Default VREF voltage used for sample conversion to millivolts.
+pub const VREF_DEFAULT_MV: u32 = 3300;
+/// VREF voltage used for factory calibration of VREFINTCAL register.
+pub const VREF_CALIB_MV: u32 = 3300;
 
 #[cfg(not(any(rcc_f4, rcc_f7)))]
 fn enable() {
@@ -47,7 +50,7 @@ impl Resolution {
         }
     }
 
-    fn to_max_count(&self) -> u32 {
+    pub fn to_max_count(&self) -> u32 {
         match self {
             Resolution::TwelveBit => (1 << 12) - 1,
             Resolution::TenBit => (1 << 10) - 1,
@@ -57,9 +60,9 @@ impl Resolution {
     }
 }
 
-pub struct Vref;
-impl<T: Instance> AdcPin<T> for Vref {}
-impl<T: Instance> super::sealed::AdcPin<T> for Vref {
+pub struct VrefInt;
+impl<T: Instance> AdcPin<T> for VrefInt {}
+impl<T: Instance> super::sealed::AdcPin<T> for VrefInt {
     fn channel(&self) -> u8 {
         17
     }
@@ -150,7 +153,7 @@ impl Prescaler {
 
 pub struct Adc<'d, T: Instance> {
     sample_time: SampleTime,
-    calibrated_vdda: u32,
+    vref_mv: u32,
     resolution: Resolution,
     phantom: PhantomData<&'d mut T>,
 }
@@ -159,8 +162,8 @@ impl<'d, T> Adc<'d, T>
 where
     T: Instance,
 {
-    pub fn new(_peri: impl Unborrow<Target = T> + 'd, delay: &mut impl DelayUs<u32>) -> Self {
-        unborrow!(_peri);
+    pub fn new(_peri: impl Peripheral<P = T> + 'd, delay: &mut impl DelayUs<u32>) -> Self {
+        into_ref!(_peri);
         enable();
 
         let presc = unsafe { Prescaler::from_pclk2(crate::rcc::get_freqs().apb2) };
@@ -180,7 +183,7 @@ where
         Self {
             sample_time: Default::default(),
             resolution: Resolution::default(),
-            calibrated_vdda: VDDA_CALIB_MV,
+            vref_mv: VREF_DEFAULT_MV,
             phantom: PhantomData,
         }
     }
@@ -193,9 +196,16 @@ where
         self.resolution = resolution;
     }
 
+    /// Set VREF value in millivolts. This value is used for [to_millivolts()] sample conversion.
+    ///
+    /// Use this if you have a known precise VREF (VDDA) pin reference voltage.
+    pub fn set_vref_mv(&mut self, vref_mv: u32) {
+        self.vref_mv = vref_mv;
+    }
+
     /// Convert a measurement to millivolts
     pub fn to_millivolts(&self, sample: u16) -> u16 {
-        ((u32::from(sample) * self.calibrated_vdda) / self.resolution.to_max_count()) as u16
+        ((u32::from(sample) * self.vref_mv) / self.resolution.to_max_count()) as u16
     }
 
     /// Perform a single conversion.

@@ -1,9 +1,9 @@
 #![macro_use]
 
-use core::marker::PhantomData;
 use core::ptr;
 
-use embassy_hal_common::unborrow;
+use embassy_embedded_hal::SetConfig;
+use embassy_hal_common::{into_ref, PeripheralRef};
 pub use embedded_hal_02::spi::{Mode, Phase, Polarity, MODE_0, MODE_1, MODE_2, MODE_3};
 use futures::future::join;
 
@@ -14,7 +14,7 @@ use crate::gpio::AnyPin;
 use crate::pac::spi::{regs, vals, Spi as Regs};
 use crate::rcc::RccPeripheral;
 use crate::time::Hertz;
-use crate::{peripherals, Unborrow};
+use crate::{peripherals, Peripheral};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -72,30 +72,27 @@ impl Config {
 }
 
 pub struct Spi<'d, T: Instance, Tx, Rx> {
-    sck: Option<AnyPin>,
-    mosi: Option<AnyPin>,
-    miso: Option<AnyPin>,
-    txdma: Tx,
-    rxdma: Rx,
+    _peri: PeripheralRef<'d, T>,
+    sck: Option<PeripheralRef<'d, AnyPin>>,
+    mosi: Option<PeripheralRef<'d, AnyPin>>,
+    miso: Option<PeripheralRef<'d, AnyPin>>,
+    txdma: PeripheralRef<'d, Tx>,
+    rxdma: PeripheralRef<'d, Rx>,
     current_word_size: WordSize,
-    phantom: PhantomData<&'d mut T>,
 }
 
 impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
-    pub fn new<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        mosi: impl Unborrow<Target = impl MosiPin<T>> + 'd,
-        miso: impl Unborrow<Target = impl MisoPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    pub fn new(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        mosi: impl Peripheral<P = impl MosiPin<T>> + 'd,
+        miso: impl Peripheral<P = impl MisoPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, mosi, miso);
+    ) -> Self {
+        into_ref!(peri, sck, mosi, miso);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
             #[cfg(any(spi_v2, spi_v3, spi_v4))]
@@ -110,9 +107,9 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
-            Some(mosi.degrade()),
-            Some(miso.degrade()),
+            Some(sck.map_into()),
+            Some(mosi.map_into()),
+            Some(miso.map_into()),
             txdma,
             rxdma,
             freq,
@@ -120,19 +117,16 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    pub fn new_rxonly<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        miso: impl Unborrow<Target = impl MisoPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd, // TODO remove
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    pub fn new_rxonly(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        miso: impl Peripheral<P = impl MisoPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd, // TODO remove
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, miso);
+    ) -> Self {
+        into_ref!(sck, miso);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
             #[cfg(any(spi_v2, spi_v3, spi_v4))]
@@ -144,9 +138,9 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
+            Some(sck.map_into()),
             None,
-            Some(miso.degrade()),
+            Some(miso.map_into()),
             txdma,
             rxdma,
             freq,
@@ -154,19 +148,16 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    pub fn new_txonly<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        mosi: impl Unborrow<Target = impl MosiPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd, // TODO remove
-        freq: F,
+    pub fn new_txonly(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        mosi: impl Peripheral<P = impl MosiPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd, // TODO remove
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, mosi);
+    ) -> Self {
+        into_ref!(sck, mosi);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
             #[cfg(any(spi_v2, spi_v3, spi_v4))]
@@ -178,8 +169,8 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
-            Some(mosi.degrade()),
+            Some(sck.map_into()),
+            Some(mosi.map_into()),
             None,
             txdma,
             rxdma,
@@ -188,20 +179,17 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    fn new_inner<F>(
-        _peri: impl Unborrow<Target = T> + 'd,
-        sck: Option<AnyPin>,
-        mosi: Option<AnyPin>,
-        miso: Option<AnyPin>,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    fn new_inner(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: Option<PeripheralRef<'d, AnyPin>>,
+        mosi: Option<PeripheralRef<'d, AnyPin>>,
+        miso: Option<PeripheralRef<'d, AnyPin>>,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(txdma, rxdma);
+    ) -> Self {
+        into_ref!(peri, txdma, rxdma);
 
         let pclk = T::frequency();
         let br = compute_baud_rate(pclk, freq.into());
@@ -291,13 +279,13 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         }
 
         Self {
+            _peri: peri,
             sck,
             mosi,
             miso,
             txdma,
             rxdma,
             current_word_size: WordSize::EightBit,
-            phantom: PhantomData,
         }
     }
 
@@ -1006,7 +994,7 @@ pub trait Word: Copy + 'static + sealed::Word + Default + crate::dma::Word {}
 impl Word for u8 {}
 impl Word for u16 {}
 
-pub trait Instance: sealed::Instance + RccPeripheral {}
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + RccPeripheral {}
 pin_trait!(SckPin, Instance);
 pin_trait!(MosiPin, Instance);
 pin_trait!(MisoPin, Instance);
@@ -1022,3 +1010,10 @@ foreach_peripheral!(
         impl Instance for peripherals::$inst {}
     };
 );
+
+impl<'d, T: Instance, Tx, Rx> SetConfig for Spi<'d, T, Tx, Rx> {
+    type Config = Config;
+    fn set_config(&mut self, config: &Self::Config) {
+        self.reconfigure(*config);
+    }
+}

@@ -1,12 +1,13 @@
 use core::marker::PhantomData;
 
-use embassy_hal_common::unborrow;
+use embassy_embedded_hal::SetConfig;
+use embassy_hal_common::into_ref;
 
 use crate::gpio::sealed::AFType;
 use crate::i2c::{Error, Instance, SclPin, SdaPin};
 use crate::pac::i2c;
 use crate::time::Hertz;
-use crate::Unborrow;
+use crate::Peripheral;
 
 pub struct State {}
 
@@ -21,16 +22,13 @@ pub struct I2c<'d, T: Instance> {
 }
 
 impl<'d, T: Instance> I2c<'d, T> {
-    pub fn new<F>(
-        _peri: impl Unborrow<Target = T> + 'd,
-        scl: impl Unborrow<Target = impl SclPin<T>> + 'd,
-        sda: impl Unborrow<Target = impl SdaPin<T>> + 'd,
-        freq: F,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(scl, sda);
+    pub fn new(
+        _peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        freq: Hertz,
+    ) -> Self {
+        into_ref!(scl, sda);
 
         T::enable();
         T::reset();
@@ -280,6 +278,74 @@ impl<'d, T: Instance> embedded_hal_02::blocking::i2c::WriteRead for I2c<'d, T> {
     }
 }
 
+#[cfg(feature = "unstable-traits")]
+mod eh1 {
+    use super::*;
+
+    impl embedded_hal_1::i2c::Error for Error {
+        fn kind(&self) -> embedded_hal_1::i2c::ErrorKind {
+            match *self {
+                Self::Bus => embedded_hal_1::i2c::ErrorKind::Bus,
+                Self::Arbitration => embedded_hal_1::i2c::ErrorKind::ArbitrationLoss,
+                Self::Nack => {
+                    embedded_hal_1::i2c::ErrorKind::NoAcknowledge(embedded_hal_1::i2c::NoAcknowledgeSource::Unknown)
+                }
+                Self::Timeout => embedded_hal_1::i2c::ErrorKind::Other,
+                Self::Crc => embedded_hal_1::i2c::ErrorKind::Other,
+                Self::Overrun => embedded_hal_1::i2c::ErrorKind::Overrun,
+                Self::ZeroLengthTransfer => embedded_hal_1::i2c::ErrorKind::Other,
+            }
+        }
+    }
+
+    impl<'d, T: Instance> embedded_hal_1::i2c::ErrorType for I2c<'d, T> {
+        type Error = Error;
+    }
+
+    impl<'d, T: Instance> embedded_hal_1::i2c::blocking::I2c for I2c<'d, T> {
+        fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_read(address, buffer)
+        }
+
+        fn write(&mut self, address: u8, buffer: &[u8]) -> Result<(), Self::Error> {
+            self.blocking_write(address, buffer)
+        }
+
+        fn write_iter<B>(&mut self, _address: u8, _bytes: B) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            todo!();
+        }
+
+        fn write_iter_read<B>(&mut self, _address: u8, _bytes: B, _buffer: &mut [u8]) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            todo!();
+        }
+
+        fn write_read(&mut self, address: u8, wr_buffer: &[u8], rd_buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_write_read(address, wr_buffer, rd_buffer)
+        }
+
+        fn transaction<'a>(
+            &mut self,
+            _address: u8,
+            _operations: &mut [embedded_hal_1::i2c::blocking::Operation<'a>],
+        ) -> Result<(), Self::Error> {
+            todo!();
+        }
+
+        fn transaction_iter<'a, O>(&mut self, _address: u8, _operations: O) -> Result<(), Self::Error>
+        where
+            O: IntoIterator<Item = embedded_hal_1::i2c::blocking::Operation<'a>>,
+        {
+            todo!();
+        }
+    }
+}
+
 enum Mode {
     Fast,
     Standard,
@@ -378,6 +444,26 @@ impl Timings {
             //sclh,
             //sdadel,
             //scldel,
+        }
+    }
+}
+
+impl<'d, T: Instance> SetConfig for I2c<'d, T> {
+    type Config = Hertz;
+    fn set_config(&mut self, config: &Self::Config) {
+        let timings = Timings::new(T::frequency(), *config);
+        unsafe {
+            T::regs().cr2().modify(|reg| {
+                reg.set_freq(timings.freq);
+            });
+            T::regs().ccr().modify(|reg| {
+                reg.set_f_s(timings.mode.f_s());
+                reg.set_duty(timings.duty.duty());
+                reg.set_ccr(timings.ccr);
+            });
+            T::regs().trise().modify(|reg| {
+                reg.set_trise(timings.trise);
+            });
         }
     }
 }

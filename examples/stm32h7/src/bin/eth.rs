@@ -3,17 +3,17 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-use embassy::util::Forever;
+use embassy_executor::executor::Spawner;
+use embassy_executor::time::{Duration, Timer};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Ipv4Address, Stack, StackResources};
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, State};
 use embassy_stm32::peripherals::ETH;
 use embassy_stm32::rng::Rng;
-use embassy_stm32::time::U32Ext;
+use embassy_stm32::time::mhz;
 use embassy_stm32::{interrupt, Config, Peripherals};
+use embassy_util::Forever;
 use embedded_io::asynch::Write;
 use rand_core::RngCore;
 use {defmt_rtt as _, panic_probe as _};
@@ -28,20 +28,20 @@ macro_rules! forever {
 
 type Device = Ethernet<'static, ETH, GenericSMI, 4, 4>;
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn net_task(stack: &'static Stack<Device>) -> ! {
     stack.run().await
 }
 
 pub fn config() -> Config {
     let mut config = Config::default();
-    config.rcc.sys_ck = Some(400.mhz().into());
-    config.rcc.hclk = Some(200.mhz().into());
-    config.rcc.pll1.q_ck = Some(100.mhz().into());
+    config.rcc.sys_ck = Some(mhz(400));
+    config.rcc.hclk = Some(mhz(200));
+    config.rcc.pll1.q_ck = Some(mhz(100));
     config
 }
 
-#[embassy::main(config = "config()")]
+#[embassy_executor::main(config = "config()")]
 async fn main(spawner: Spawner, p: Peripherals) -> ! {
     info!("Hello World!");
 

@@ -1,11 +1,11 @@
 use core::cmp;
-use core::marker::PhantomData;
 use core::task::Poll;
 
 use atomic_polyfill::{AtomicUsize, Ordering};
-use embassy::waitqueue::AtomicWaker;
+use embassy_embedded_hal::SetConfig;
 use embassy_hal_common::drop::OnDrop;
-use embassy_hal_common::unborrow;
+use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_util::waitqueue::AtomicWaker;
 use futures::future::poll_fn;
 
 use crate::dma::NoDma;
@@ -14,7 +14,7 @@ use crate::i2c::{Error, Instance, SclPin, SdaPin};
 use crate::interrupt::InterruptExt;
 use crate::pac::i2c;
 use crate::time::Hertz;
-use crate::Unborrow;
+use crate::Peripheral;
 
 pub struct State {
     waker: AtomicWaker,
@@ -31,26 +31,23 @@ impl State {
 }
 
 pub struct I2c<'d, T: Instance, TXDMA = NoDma, RXDMA = NoDma> {
-    phantom: PhantomData<&'d mut T>,
-    tx_dma: TXDMA,
+    _peri: PeripheralRef<'d, T>,
+    tx_dma: PeripheralRef<'d, TXDMA>,
     #[allow(dead_code)]
-    rx_dma: RXDMA,
+    rx_dma: PeripheralRef<'d, RXDMA>,
 }
 
 impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
-    pub fn new<F>(
-        _peri: impl Unborrow<Target = T> + 'd,
-        scl: impl Unborrow<Target = impl SclPin<T>> + 'd,
-        sda: impl Unborrow<Target = impl SdaPin<T>> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        tx_dma: impl Unborrow<Target = TXDMA> + 'd,
-        rx_dma: impl Unborrow<Target = RXDMA> + 'd,
-        freq: F,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(irq, scl, sda, tx_dma, rx_dma);
+    pub fn new(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        tx_dma: impl Peripheral<P = TXDMA> + 'd,
+        rx_dma: impl Peripheral<P = RXDMA> + 'd,
+        freq: Hertz,
+    ) -> Self {
+        into_ref!(peri, irq, scl, sda, tx_dma, rx_dma);
 
         T::enable();
         T::reset();
@@ -90,7 +87,7 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
         irq.enable();
 
         Self {
-            phantom: PhantomData,
+            _peri: peri,
             tx_dma,
             rx_dma,
         }
@@ -832,7 +829,6 @@ impl Timings {
 
 #[cfg(feature = "unstable-traits")]
 mod eh1 {
-    use super::super::{RxDma, TxDma};
     use super::*;
 
     impl embedded_hal_1::i2c::Error for Error {
@@ -851,8 +847,51 @@ mod eh1 {
         }
     }
 
-    impl<'d, T: Instance, TXDMA: TxDma<T>, RXDMA: RxDma<T>> embedded_hal_1::i2c::ErrorType for I2c<'d, T, TXDMA, RXDMA> {
+    impl<'d, T: Instance, TXDMA, RXDMA> embedded_hal_1::i2c::ErrorType for I2c<'d, T, TXDMA, RXDMA> {
         type Error = Error;
+    }
+
+    impl<'d, T: Instance> embedded_hal_1::i2c::blocking::I2c for I2c<'d, T, NoDma, NoDma> {
+        fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_read(address, buffer)
+        }
+
+        fn write(&mut self, address: u8, buffer: &[u8]) -> Result<(), Self::Error> {
+            self.blocking_write(address, buffer)
+        }
+
+        fn write_iter<B>(&mut self, _address: u8, _bytes: B) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            todo!();
+        }
+
+        fn write_iter_read<B>(&mut self, _address: u8, _bytes: B, _buffer: &mut [u8]) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            todo!();
+        }
+
+        fn write_read(&mut self, address: u8, wr_buffer: &[u8], rd_buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_write_read(address, wr_buffer, rd_buffer)
+        }
+
+        fn transaction<'a>(
+            &mut self,
+            _address: u8,
+            _operations: &mut [embedded_hal_1::i2c::blocking::Operation<'a>],
+        ) -> Result<(), Self::Error> {
+            todo!();
+        }
+
+        fn transaction_iter<'a, O>(&mut self, _address: u8, _operations: O) -> Result<(), Self::Error>
+        where
+            O: IntoIterator<Item = embedded_hal_1::i2c::blocking::Operation<'a>>,
+        {
+            todo!();
+        }
     }
 }
 
@@ -896,6 +935,22 @@ cfg_if::cfg_if! {
                 let _ = operations;
                 async move { todo!() }
             }
+        }
+    }
+}
+
+impl<'d, T: Instance> SetConfig for I2c<'d, T> {
+    type Config = Hertz;
+    fn set_config(&mut self, config: &Self::Config) {
+        let timings = Timings::new(T::frequency(), *config);
+        unsafe {
+            T::regs().timingr().write(|reg| {
+                reg.set_presc(timings.prescale);
+                reg.set_scll(timings.scll);
+                reg.set_sclh(timings.sclh);
+                reg.set_sdadel(timings.sdadel);
+                reg.set_scldel(timings.scldel);
+            });
         }
     }
 }

@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use embassy_hal_common::unborrow;
+use embassy_hal_common::into_ref;
 pub use pll::PllConfig;
 use stm32_metapac::rcc::vals::{Mco1, Mco2};
 
@@ -10,12 +10,19 @@ use crate::pac::rcc::vals::{Adcsel, Ckpersel, Dppre, Hpre, Hsidiv, Pllsrc, Sw, T
 use crate::pac::{PWR, RCC, SYSCFG};
 use crate::rcc::{set_freqs, Clocks};
 use crate::time::Hertz;
-use crate::{peripherals, Unborrow};
+use crate::{peripherals, Peripheral};
 
-const HSI: Hertz = Hertz(64_000_000);
-const CSI: Hertz = Hertz(4_000_000);
-const HSI48: Hertz = Hertz(48_000_000);
-const LSI: Hertz = Hertz(32_000);
+/// HSI speed
+pub const HSI_FREQ: Hertz = Hertz(64_000_000);
+
+/// CSI speed
+pub const CSI_FREQ: Hertz = Hertz(4_000_000);
+
+/// HSI48 speed
+pub const HSI48_FREQ: Hertz = Hertz(48_000_000);
+
+/// LSI speed
+pub const LSI_FREQ: Hertz = Hertz(32_000);
 
 /// Voltage Scale
 ///
@@ -378,12 +385,12 @@ pub struct Mco<'d, T: McoInstance> {
 
 impl<'d, T: McoInstance> Mco<'d, T> {
     pub fn new(
-        _peri: impl Unborrow<Target = T> + 'd,
-        pin: impl Unborrow<Target = impl McoPin<T>> + 'd,
+        _peri: impl Peripheral<P = T> + 'd,
+        pin: impl Peripheral<P = impl McoPin<T>> + 'd,
         source: impl McoSource<Raw = T::Source>,
         prescaler: McoClock,
     ) -> Self {
-        unborrow!(pin);
+        into_ref!(pin);
 
         critical_section::with(|_| unsafe {
             T::apply_clock_settings(source.into_raw(), prescaler.into_raw());
@@ -461,7 +468,7 @@ pub(crate) unsafe fn init(mut config: Config) {
     // achieved, but the mechanism for doing so is not yet
     // implemented here.
 
-    let srcclk = config.hse.unwrap_or(HSI); // Available clocks
+    let srcclk = config.hse.unwrap_or(HSI_FREQ); // Available clocks
     let (sys_ck, sys_use_pll1_p) = sys_ck_setup(&mut config, srcclk);
 
     // Configure traceclk from PLL if needed
@@ -490,9 +497,9 @@ pub(crate) unsafe fn init(mut config: Config) {
 
     // per_ck from HSI by default
     let (per_ck, ckpersel) = match (config.per_ck == config.hse, config.per_ck) {
-        (true, Some(hse)) => (hse, Ckpersel::HSE), // HSE
-        (_, Some(CSI)) => (CSI, Ckpersel::CSI),    // CSI
-        _ => (HSI, Ckpersel::HSI),                 // HSI
+        (true, Some(hse)) => (hse, Ckpersel::HSE),        // HSE
+        (_, Some(CSI_FREQ)) => (CSI_FREQ, Ckpersel::CSI), // CSI
+        _ => (HSI_FREQ, Ckpersel::HSI),                   // HSI
     };
 
     // D1 Core Prescaler
@@ -664,10 +671,10 @@ pub(crate) unsafe fn init(mut config: Config) {
         ppre2,
         ppre3,
         ppre4,
-        csi_ck: Some(CSI),
-        hsi_ck: Some(HSI),
-        hsi48_ck: Some(HSI48),
-        lsi_ck: Some(LSI),
+        csi_ck: Some(CSI_FREQ),
+        hsi_ck: Some(HSI_FREQ),
+        hsi48_ck: Some(HSI48_FREQ),
+        lsi_ck: Some(LSI_FREQ),
         per_ck: Some(per_ck),
         hse_ck,
         pll1_p_ck: pll1_p_ck.map(Hertz),

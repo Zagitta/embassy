@@ -8,21 +8,21 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Waker;
 
 use defmt::*;
-use embassy::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy::channel::mpmc::Channel;
-use embassy::executor::Spawner;
-use embassy::util::Forever;
+use embassy_executor::executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{PacketBox, PacketBoxExt, PacketBuf, Stack, StackResources};
 use embassy_nrf::rng::Rng;
-use embassy_nrf::usb::Driver;
+use embassy_nrf::usb::{Driver, PowerUsb};
 use embassy_nrf::{interrupt, pac, peripherals, Peripherals};
 use embassy_usb::{Builder, Config, UsbDevice};
 use embassy_usb_ncm::{CdcNcmClass, Receiver, Sender, State};
+use embassy_util::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_util::channel::mpmc::Channel;
+use embassy_util::Forever;
 use embedded_io::asynch::{Read, Write};
 use {defmt_rtt as _, panic_probe as _};
 
-type MyDriver = Driver<'static, peripherals::USBD>;
+type MyDriver = Driver<'static, peripherals::USBD, PowerUsb>;
 
 macro_rules! forever {
     ($val:expr) => {{
@@ -32,12 +32,12 @@ macro_rules! forever {
     }};
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, MyDriver>) -> ! {
     device.run().await
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn usb_ncm_rx_task(mut class: Receiver<'static, MyDriver>) {
     loop {
         warn!("WAITING for connection");
@@ -66,7 +66,7 @@ async fn usb_ncm_rx_task(mut class: Receiver<'static, MyDriver>) {
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn usb_ncm_tx_task(mut class: Sender<'static, MyDriver>) {
     loop {
         let pkt = TX_CHANNEL.recv().await;
@@ -76,27 +76,23 @@ async fn usb_ncm_tx_task(mut class: Sender<'static, MyDriver>) {
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn net_task(stack: &'static Stack<Device>) -> ! {
     stack.run().await
 }
 
-#[embassy::main]
+#[embassy_executor::main]
 async fn main(spawner: Spawner, p: Peripherals) {
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
     while clock.events_hfclkstarted.read().bits() != 1 {}
 
-    info!("Waiting for vbus...");
-    while !power.usbregstatus.read().vbusdetect().is_vbus_present() {}
-    info!("vbus OK");
-
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);

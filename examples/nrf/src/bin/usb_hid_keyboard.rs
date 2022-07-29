@@ -7,44 +7,24 @@ use core::mem;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use defmt::*;
-use embassy::channel::signal::Signal;
-use embassy::executor::Spawner;
-use embassy::time::Duration;
-use embassy::util::{select, select3, Either, Either3};
+use embassy_executor::executor::Spawner;
 use embassy_nrf::gpio::{Input, Pin, Pull};
-use embassy_nrf::interrupt::InterruptExt;
-use embassy_nrf::usb::Driver;
+use embassy_nrf::usb::{Driver, PowerUsb};
 use embassy_nrf::{interrupt, pac, Peripherals};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, DeviceStateHandler};
 use embassy_usb_hid::{HidReaderWriter, ReportId, RequestHandler, State};
+use embassy_util::channel::signal::Signal;
+use embassy_util::{select, Either};
 use futures::future::join;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
 
-static ENABLE_USB: Signal<bool> = Signal::new();
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-fn on_power_interrupt(_: *mut ()) {
-    let regs = unsafe { &*pac::POWER::ptr() };
-
-    if regs.events_usbdetected.read().bits() != 0 {
-        regs.events_usbdetected.reset();
-        info!("Vbus detected, enabling USB...");
-        ENABLE_USB.signal(true);
-    }
-
-    if regs.events_usbremoved.read().bits() != 0 {
-        regs.events_usbremoved.reset();
-        info!("Vbus removed, disabling USB...");
-        ENABLE_USB.signal(false);
-    }
-}
-
-#[embassy::main]
+#[embassy_executor::main]
 async fn main(_spawner: Spawner, p: Peripherals) {
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
@@ -52,7 +32,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -100,31 +81,11 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     // Run the USB device.
     let usb_fut = async {
-        enable_command().await;
         loop {
-            match select(usb.run_until_suspend(), ENABLE_USB.wait()).await {
-                Either::First(_) => {}
-                Either::Second(enable) => {
-                    if enable {
-                        warn!("Enable when already enabled!");
-                    } else {
-                        usb.disable().await;
-                        enable_command().await;
-                    }
-                }
-            }
-
-            match select3(usb.wait_resume(), ENABLE_USB.wait(), remote_wakeup.wait()).await {
-                Either3::First(_) => (),
-                Either3::Second(enable) => {
-                    if enable {
-                        warn!("Enable when already enabled!");
-                    } else {
-                        usb.disable().await;
-                        enable_command().await;
-                    }
-                }
-                Either3::Third(_) => unwrap!(usb.remote_wakeup().await),
+            usb.run_until_suspend().await;
+            match select(usb.wait_resume(), remote_wakeup.wait()).await {
+                Either::First(_) => (),
+                Either::Second(_) => unwrap!(usb.remote_wakeup().await),
             }
         }
     };
@@ -174,26 +135,9 @@ async fn main(_spawner: Spawner, p: Peripherals) {
         reader.run(false, &request_handler).await;
     };
 
-    let power_irq = interrupt::take!(POWER_CLOCK);
-    power_irq.set_handler(on_power_interrupt);
-    power_irq.unpend();
-    power_irq.enable();
-
-    power.intenset.write(|w| w.usbdetected().set().usbremoved().set());
-
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
     join(usb_fut, join(in_fut, out_fut)).await;
-}
-
-async fn enable_command() {
-    loop {
-        if ENABLE_USB.wait().await {
-            break;
-        } else {
-            warn!("Received disable signal when already disabled!");
-        }
-    }
 }
 
 struct MyRequestHandler {}
@@ -209,11 +153,11 @@ impl RequestHandler for MyRequestHandler {
         OutResponse::Accepted
     }
 
-    fn set_idle(&self, id: Option<ReportId>, dur: Duration) {
+    fn set_idle_ms(&self, id: Option<ReportId>, dur: u32) {
         info!("Set idle rate for {:?} to {:?}", id, dur);
     }
 
-    fn get_idle(&self, id: Option<ReportId>) -> Option<Duration> {
+    fn get_idle_ms(&self, id: Option<ReportId>) -> Option<u32> {
         info!("Get idle rate for {:?}", id);
         None
     }

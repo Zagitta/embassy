@@ -3,19 +3,20 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-use embassy_stm32::pwm::simple_pwm::SimplePwm;
+use embassy_executor::executor::Spawner;
+use embassy_executor::time::{Duration, Timer};
+use embassy_stm32::pwm::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::pwm::Channel;
-use embassy_stm32::time::U32Ext;
+use embassy_stm32::time::khz;
 use embassy_stm32::Peripherals;
 use {defmt_rtt as _, panic_probe as _};
 
-#[embassy::main]
+#[embassy_executor::main]
 async fn main(_spawner: Spawner, p: Peripherals) {
     info!("Hello World!");
 
-    let mut pwm = SimplePwm::new_1ch(p.TIM2, p.PA5, 10000.hz());
+    let ch1 = PwmPin::new_ch1(p.PA5);
+    let mut pwm = SimplePwm::new(p.TIM2, Some(ch1), None, None, None, khz(10));
     let max = pwm.get_max_duty();
     pwm.enable(Channel::Ch1);
 

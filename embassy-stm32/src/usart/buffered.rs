@@ -2,9 +2,9 @@ use core::future::Future;
 use core::task::Poll;
 
 use atomic_polyfill::{compiler_fence, Ordering};
-use embassy::waitqueue::WakerRegistration;
 use embassy_cortex_m::peripheral::{PeripheralMutex, PeripheralState, StateStorage};
 use embassy_hal_common::ring_buffer::RingBuffer;
+use embassy_util::waitqueue::WakerRegistration;
 use futures::future::poll_fn;
 
 use super::*;
@@ -39,11 +39,11 @@ impl<'d, T: Instance> BufferedUart<'d, T> {
     pub fn new(
         state: &'d mut State<'d, T>,
         _uart: Uart<'d, T, NoDma, NoDma>,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
         tx_buffer: &'d mut [u8],
         rx_buffer: &'d mut [u8],
     ) -> BufferedUart<'d, T> {
-        unborrow!(irq);
+        into_ref!(irq);
 
         let r = T::regs();
         unsafe {

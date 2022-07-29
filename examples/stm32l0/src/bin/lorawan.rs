@@ -11,7 +11,7 @@ use embassy_lora::LoraTimer;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::rng::Rng;
-use embassy_stm32::time::U32Ext;
+use embassy_stm32::time::khz;
 use embassy_stm32::{spi, Peripherals};
 use lorawan::default_crypto::DefaultFactory as Crypto;
 use lorawan_device::async_device::{region, Device, JoinMode};
@@ -24,8 +24,8 @@ fn config() -> embassy_stm32::Config {
     config
 }
 
-#[embassy::main(config = "config()")]
-async fn main(_spawner: embassy::executor::Spawner, p: Peripherals) {
+#[embassy_executor::main(config = "config()")]
+async fn main(_spawner: embassy_executor::executor::Spawner, p: Peripherals) {
     // SPI for sx127x
     let spi = spi::Spi::new(
         p.SPI1,
@@ -34,7 +34,7 @@ async fn main(_spawner: embassy::executor::Spawner, p: Peripherals) {
         p.PA6,
         p.DMA1_CH3,
         p.DMA1_CH2,
-        200_000.hz(),
+        khz(200),
         spi::Config::default(),
     );
 

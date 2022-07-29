@@ -6,8 +6,13 @@ use pac::adc::vals::{Adcaldif, Boost, Difsel, Exten, Pcsel};
 use pac::adccommon::vals::Presc;
 
 use super::{AdcPin, Instance};
-use crate::time::{Hertz, U32Ext};
-use crate::{pac, Unborrow};
+use crate::time::Hertz;
+use crate::{pac, Peripheral};
+
+/// Default VREF voltage used for sample conversion to millivolts.
+pub const VREF_DEFAULT_MV: u32 = 3300;
+/// VREF voltage used for factory calibration of VREFINTCAL register.
+pub const VREF_CALIB_MV: u32 = 3300;
 
 pub enum Resolution {
     SixteenBit,
@@ -53,10 +58,10 @@ mod sealed {
     }
 }
 
-// NOTE: Vref/Temperature/Vbat are only available on ADC3 on H7, this currently cannot be modeled with stm32-data, so these are available from the software on all ADCs
-pub struct Vref;
-impl<T: Instance> InternalChannel<T> for Vref {}
-impl<T: Instance> sealed::InternalChannel<T> for Vref {
+// NOTE: Vrefint/Temperature/Vbat are only available on ADC3 on H7, this currently cannot be modeled with stm32-data, so these are available from the software on all ADCs
+pub struct VrefInt;
+impl<T: Instance> InternalChannel<T> for VrefInt {}
+impl<T: Instance> sealed::InternalChannel<T> for VrefInt {
     fn channel(&self) -> u8 {
         19
     }
@@ -317,13 +322,14 @@ impl Prescaler {
 
 pub struct Adc<'d, T: Instance> {
     sample_time: SampleTime,
+    vref_mv: u32,
     resolution: Resolution,
     phantom: PhantomData<&'d mut T>,
 }
 
 impl<'d, T: Instance + crate::rcc::RccPeripheral> Adc<'d, T> {
-    pub fn new(_peri: impl Unborrow<Target = T> + 'd, delay: &mut impl DelayUs<u16>) -> Self {
-        embassy_hal_common::unborrow!(_peri);
+    pub fn new(_peri: impl Peripheral<P = T> + 'd, delay: &mut impl DelayUs<u16>) -> Self {
+        embassy_hal_common::into_ref!(_peri);
         T::enable();
         T::reset();
 
@@ -336,14 +342,14 @@ impl<'d, T: Instance + crate::rcc::RccPeripheral> Adc<'d, T> {
         let frequency = Hertz(T::frequency().0 / prescaler.divisor());
         info!("ADC frequency set to {} Hz", frequency.0);
 
-        if frequency > 50.mhz().into() {
+        if frequency > Hertz::mhz(50) {
             panic!("Maximal allowed frequency for the ADC is 50 MHz and it varies with different packages, refer to ST docs for more information.");
         }
-        let boost = if frequency < 6_250.khz().into() {
+        let boost = if frequency < Hertz::khz(6_250) {
             Boost::LT6_25
-        } else if frequency < 12_500.khz().into() {
+        } else if frequency < Hertz::khz(12_500) {
             Boost::LT12_5
-        } else if frequency < 25.mhz().into() {
+        } else if frequency < Hertz::mhz(25) {
             Boost::LT25
         } else {
             Boost::LT50
@@ -354,6 +360,7 @@ impl<'d, T: Instance + crate::rcc::RccPeripheral> Adc<'d, T> {
 
         let mut s = Self {
             sample_time: Default::default(),
+            vref_mv: VREF_DEFAULT_MV,
             resolution: Resolution::default(),
             phantom: PhantomData,
         };
@@ -422,14 +429,14 @@ impl<'d, T: Instance + crate::rcc::RccPeripheral> Adc<'d, T> {
         }
     }
 
-    pub fn enable_vref(&self) -> Vref {
+    pub fn enable_vrefint(&self) -> VrefInt {
         unsafe {
             T::common_regs().ccr().modify(|reg| {
                 reg.set_vrefen(true);
             });
         }
 
-        Vref {}
+        VrefInt {}
     }
 
     pub fn enable_temperature(&self) -> Temperature {
@@ -460,9 +467,16 @@ impl<'d, T: Instance + crate::rcc::RccPeripheral> Adc<'d, T> {
         self.resolution = resolution;
     }
 
+    /// Set VREF value in millivolts. This value is used for [to_millivolts()] sample conversion.
+    ///
+    /// Use this if you have a known precise VREF (VDDA) pin reference voltage.
+    pub fn set_vref_mv(&mut self, vref_mv: u32) {
+        self.vref_mv = vref_mv;
+    }
+
     /// Convert a measurement to millivolts
     pub fn to_millivolts(&self, sample: u16) -> u16 {
-        ((u32::from(sample) * 3300) / self.resolution.to_max_count()) as u16
+        ((u32::from(sample) * self.vref_mv) / self.resolution.to_max_count()) as u16
     }
 
     /// Perform a single conversion.

@@ -1,6 +1,6 @@
 use crate::pac::{FLASH, RCC};
 use crate::rcc::{set_freqs, Clocks};
-use crate::time::U32Ext;
+use crate::time::Hertz;
 
 /// Most of clock setup is copied from stm32l0xx-hal, and adopted to the generated PAC,
 /// and with the addition of the init function to configure a system clock.
@@ -8,9 +8,13 @@ use crate::time::U32Ext;
 /// Only the basic setup using the HSE and HSI clocks are supported as of now.
 
 /// HSI speed
-pub const HSI_FREQ: u32 = 16_000_000;
+pub const HSI_FREQ: Hertz = Hertz(16_000_000);
 
-pub const HSE32_FREQ: u32 = 32_000_000;
+/// LSI speed
+pub const LSI_FREQ: Hertz = Hertz(32_000);
+
+/// HSE32 speed
+pub const HSE32_FREQ: Hertz = Hertz(32_000_000);
 
 /// System clock mux source
 #[derive(Clone, Copy)]
@@ -203,7 +207,7 @@ pub(crate) unsafe fn init(config: Config) {
             RCC.cr().write(|w| w.set_hsion(true));
             while !RCC.cr().read().hsirdy() {}
 
-            (HSI_FREQ, 0x01, VoltageScale::Range2)
+            (HSI_FREQ.0, 0x01, VoltageScale::Range2)
         }
         ClockSrc::HSE32 => {
             // Enable HSE32
@@ -213,7 +217,7 @@ pub(crate) unsafe fn init(config: Config) {
             });
             while !RCC.cr().read().hserdy() {}
 
-            (HSE32_FREQ, 0x02, VoltageScale::Range1)
+            (HSE32_FREQ.0, 0x02, VoltageScale::Range1)
         }
         ClockSrc::MSI(range) => {
             RCC.cr().write(|w| {
@@ -316,14 +320,14 @@ pub(crate) unsafe fn init(config: Config) {
     while FLASH.acr().read().latency() != ws {}
 
     set_freqs(Clocks {
-        sys: sys_clk.hz(),
-        ahb1: ahb_freq.hz(),
-        ahb2: ahb_freq.hz(),
-        ahb3: shd_ahb_freq.hz(),
-        apb1: apb1_freq.hz(),
-        apb2: apb2_freq.hz(),
-        apb3: apb3_freq.hz(),
-        apb1_tim: apb1_tim_freq.hz(),
-        apb2_tim: apb2_tim_freq.hz(),
+        sys: Hertz(sys_clk),
+        ahb1: Hertz(ahb_freq),
+        ahb2: Hertz(ahb_freq),
+        ahb3: Hertz(shd_ahb_freq),
+        apb1: Hertz(apb1_freq),
+        apb2: Hertz(apb2_freq),
+        apb3: Hertz(apb3_freq),
+        apb1_tim: Hertz(apb1_tim_freq),
+        apb2_tim: Hertz(apb2_tim_freq),
     });
 }
