@@ -28,3 +28,11 @@ rand = { version = "0.8.4", default-features = false }
 embedded-storage = "0.3.0"
 usbd-hid = "0.5.2"
 serde = { version = "1.0.136", default-features = false }
+
+
+[profile.release]
+lto = "fat"
+opt-level = 2
+codegen-units = 1
+panic = "abort"
+debug = 2

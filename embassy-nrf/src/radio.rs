@@ -149,7 +149,7 @@ pub struct Value24Bit(u32);
 impl Value24Bit {
     pub fn new(val: u32) -> Result<Self, Error> {
         match val {
-            0..=0x0fff => Ok(Value24Bit(val)),
+            0..=0x0fffff => Ok(Value24Bit(val)),
             _ => Err(Error::ValueTooLarge),
         }
     }
@@ -697,6 +697,8 @@ impl<'d, T: Instance> Radio<'d, T> {
             // take in to account actions by DMA. The fence has been placed here,
             // after all possible DMA actions have completed.
             compiler_fence(SeqCst);
+
+            info!("Awaiting interrupt");
 
             // Wait for 'end' event.
             poll_fn(Self::wait_for_disabled_event).await;
